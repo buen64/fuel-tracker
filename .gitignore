@@ -1,0 +1,27 @@
+# API-Key – niemals einchecken!
+.env
+
+# Datenbank
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Conda / virtuelle Umgebungen
+.conda/
+env/
+venv/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

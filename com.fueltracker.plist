@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Installation (einmalig, im Terminal):
+  ─────────────────────────────────────
+  1. USERNAME und PROJECTPATH anpassen
+  2. cp com.fueltracker.plist ~/Library/LaunchAgents/
+  3. launchctl load ~/Library/LaunchAgents/com.fueltracker.plist
+
+  Status prüfen:  launchctl list | grep fueltracker
+  Stoppen:        launchctl unload ~/Library/LaunchAgents/com.fueltracker.plist
+  Logs:           tail -f /Users/USERNAME/fuel-tracker/logs/stdout.log
+-->
+<plist version="1.0">
+<dict>
+
+  <key>Label</key>
+  <string>com.fueltracker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/Caskroom/miniforge/base/envs/fuel-tracker/bin/python</string>
+    <string>/Users/uwe/Projects/fuel-tracker/main.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/uwe/Projects/fuel-tracker</string>
+
+  <!-- Beim Mac-Start automatisch laden -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Bei Absturz neu starten -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Log-Dateien -->
+  <key>StandardOutPath</key>
+  <string>/Users/uwe/Projects/fuel-tracker/logs/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/uwe/Projects/fuel-tracker/logs/stderr.log</string>
+
+</dict>
+</plist>
