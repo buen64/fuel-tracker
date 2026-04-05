@@ -2,21 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Installation (einmalig, im Terminal):
-  ─────────────────────────────────────
-  1. USERNAME und PROJECTPATH anpassen
-  2. cp com.fueltracker.plist ~/Library/LaunchAgents/
-  3. launchctl load ~/Library/LaunchAgents/com.fueltracker.plist
+  Installation als LaunchDaemon (läuft auch ohne Login):
+  ───────────────────────────────────────────────────────
+  Alten LaunchAgent zuerst entfernen:
+    launchctl bootout gui/$(id -u)/com.fueltracker
+    rm ~/Library/LaunchAgents/com.fueltracker.plist
 
-  Status prüfen:  launchctl list | grep fueltracker
-  Stoppen:        launchctl unload ~/Library/LaunchAgents/com.fueltracker.plist
-  Logs:           tail -f /Users/USERNAME/fuel-tracker/logs/stdout.log
+  Neuen LaunchDaemon installieren (benötigt sudo):
+    sudo cp com.fueltracker.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.fueltracker.plist
+    sudo chmod 644 /Library/LaunchDaemons/com.fueltracker.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.fueltracker.plist
+
+  Status prüfen:  sudo launchctl print system/com.fueltracker | grep -E "state|exit"
+  Stoppen:        sudo launchctl bootout system/com.fueltracker
+  Starten:        sudo launchctl bootstrap system /Library/LaunchDaemons/com.fueltracker.plist
+  Logs:           tail -f /Users/uwe/Projects/fuel-tracker/logs/stdout.log
 -->
 <plist version="1.0">
 <dict>
 
   <key>Label</key>
   <string>com.fueltracker</string>
+
+  <!-- Als Benutzer uwe ausführen, nicht als root -->
+  <key>UserName</key>
+  <string>uwe</string>
 
   <key>ProgramArguments</key>
   <array>
