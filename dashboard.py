@@ -92,7 +92,7 @@ app.layout = html.Div([
                 dcc.RadioItems(
                     id="fuel-type",
                     options=FUEL_OPTIONS,
-                    value="e5",
+                    value="e10",
                     labelStyle=RADIO_ITEM,
                 ),
             ], style={**CARD, "marginBottom": "16px"}),
