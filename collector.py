@@ -94,7 +94,7 @@ def fetch_prices() -> None:
         log.error("API-Fehler (Preise): %s", data.get("message"))
         return
 
-    now = datetime.utcnow()
+    now = datetime.now()
     rows = []
     for sid, p in data["prices"].items():
         # Auch geschlossene Tankstellen speichern (Preis gilt weiter)

@@ -40,7 +40,7 @@ class Price(Base):
     e5          = Column(Float)
     e10         = Column(Float)
     diesel      = Column(Float)
-    recorded_at = Column(DateTime, nullable=False, index=True, default=datetime.utcnow)
+    recorded_at = Column(DateTime, nullable=False, index=True, default=datetime.now)
 
 
 def init_db() -> None:
