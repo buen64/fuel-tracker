@@ -1,11 +1,17 @@
 """
 Dash-Dashboard: Kraftstoffpreis-Verlauf für Tankstellen im Raum Tostedt.
 Erreichbar unter http://<mac-ip>:8050 im lokalen Netzwerk.
+
+Aggregationslogik:
+  Tag, Woche  → alle Messpunkte (Rohdaten)
+  Monat       → Tagesdurchschnitt
+  Jahr        → Wochendurchschnitt
 """
 from datetime import datetime, timedelta
 
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
+from sqlalchemy import func
 
 from db import Price, Station, get_session
 
@@ -36,7 +42,7 @@ RANGE_DELTA = {
 FUEL_LABEL = {"e5": "Super E5", "e10": "Super E10", "diesel": "Diesel"}
 
 # ---------------------------------------------------------------------------
-# Styles (inline, kein externes CSS erforderlich)
+# Styles
 # ---------------------------------------------------------------------------
 
 CARD = {
@@ -57,6 +63,60 @@ LABEL = {
 }
 
 RADIO_ITEM = {"display": "block", "padding": "5px 0", "cursor": "pointer", "fontSize": "14px"}
+
+# ---------------------------------------------------------------------------
+# Hilfsfunktion: Aggregation je nach Zeitraum
+# ---------------------------------------------------------------------------
+
+def _get_trace_data(s, sid: str, fuel_type: str, time_range: str, since: datetime):
+    """
+    Gibt (x_werte, y_werte) zurück.
+    Tag/Woche: Rohdaten
+    Monat:     Tagesdurchschnitt
+    Jahr:      Wochendurchschnitt
+    """
+    fuel_col = getattr(Price, fuel_type)
+
+    if time_range in ("day", "week"):
+        rows = (
+            s.query(Price.recorded_at, fuel_col)
+            .filter(Price.station_id == sid, Price.recorded_at >= since)
+            .filter(fuel_col.isnot(None))
+            .order_by(Price.recorded_at)
+            .all()
+        )
+        return [r[0] for r in rows], [r[1] for r in rows]
+
+    elif time_range == "month":
+        # Tagesdurchschnitt: nach Datum gruppieren
+        rows = (
+            s.query(
+                func.date(Price.recorded_at).label("day"),
+                func.avg(fuel_col).label("avg_price"),
+            )
+            .filter(Price.station_id == sid, Price.recorded_at >= since)
+            .filter(fuel_col.isnot(None))
+            .group_by(func.date(Price.recorded_at))
+            .order_by(func.date(Price.recorded_at))
+            .all()
+        )
+        return [r[0] for r in rows], [round(r[1], 3) for r in rows]
+
+    else:  # year
+        # Wochendurchschnitt: nach ISO-Kalenderwoche gruppieren
+        rows = (
+            s.query(
+                func.strftime("%Y-%W", Price.recorded_at).label("week"),
+                func.avg(fuel_col).label("avg_price"),
+            )
+            .filter(Price.station_id == sid, Price.recorded_at >= since)
+            .filter(fuel_col.isnot(None))
+            .group_by(func.strftime("%Y-%W", Price.recorded_at))
+            .order_by(func.strftime("%Y-%W", Price.recorded_at))
+            .all()
+        )
+        return [r[0] for r in rows], [round(r[1], 3) for r in rows]
+
 
 # ---------------------------------------------------------------------------
 # App-Layout
@@ -131,8 +191,12 @@ app.layout = html.Div([
         # ── Rechte Seite ────────────────────────────────────────────────────
         html.Div([
 
-            # Chart
+            # Chart + Hinweis zur Aggregation
             html.Div([
+                html.Div(id="aggregation-hint", style={
+                    "fontSize": "11px", "color": "#aaa",
+                    "textAlign": "right", "marginBottom": "4px",
+                }),
                 dcc.Graph(
                     id="price-chart",
                     config={"displayModeBar": False},
@@ -146,14 +210,14 @@ app.layout = html.Div([
                 dash_table.DataTable(
                     id="station-table",
                     columns=[
-                        {"name": "Marke",    "id": "brand"},
-                        {"name": "Name",     "id": "name"},
-                        {"name": "Adresse",  "id": "address"},
-                        {"name": "Ort",      "id": "place"},
-                        {"name": "Entf.",    "id": "dist"},
-                        {"name": "E5",       "id": "e5"},
-                        {"name": "E10",      "id": "e10"},
-                        {"name": "Diesel",   "id": "diesel"},
+                        {"name": "Marke",   "id": "brand"},
+                        {"name": "Name",    "id": "name"},
+                        {"name": "Adresse", "id": "address"},
+                        {"name": "Ort",     "id": "place"},
+                        {"name": "Entf.",   "id": "dist"},
+                        {"name": "E5",      "id": "e5"},
+                        {"name": "E10",     "id": "e10"},
+                        {"name": "Diesel",  "id": "diesel"},
                     ],
                     sort_action="native",
                     style_table={"overflowX": "auto"},
@@ -204,26 +268,17 @@ app.layout = html.Div([
 def refresh_station_list(_, current_selection):
     """Stationsliste aus DB laden; Benutzer-Auswahl beim Refresh erhalten."""
     with get_session() as s:
-        stations = (
-            s.query(Station)
-            .order_by(Station.dist_km)
-            .all()
-        )
+        stations = s.query(Station).order_by(Station.dist_km).all()
 
     options = [
-        {
-            "label": f"{st.brand}  ·  {st.place} ({st.dist_km:.1f} km)",
-            "value": st.id,
-        }
+        {"label": f"{st.brand}  ·  {st.place} ({st.dist_km:.1f} km)", "value": st.id}
         for st in stations
     ]
     all_ids = [st.id for st in stations]
 
     if not current_selection:
-        # Erster Aufruf: alle auswählen
         return options, all_ids
 
-    # Neu hinzugekommene Stationen automatisch aktivieren
     new = [i for i in all_ids if i not in current_selection]
     return options, current_selection + new
 
@@ -235,13 +290,13 @@ def refresh_station_list(_, current_selection):
     prevent_initial_call=True,
 )
 def select_all(_, options):
-    """'alle'-Link: alle Stationen wieder einblenden."""
     return [o["value"] for o in options]
 
 
 @callback(
     Output("price-chart", "figure"),
     Output("station-table", "data"),
+    Output("aggregation-hint", "children"),
     Input("fuel-type", "value"),
     Input("time-range", "value"),
     Input("station-filter", "value"),
@@ -249,10 +304,18 @@ def select_all(_, options):
 )
 def update_view(fuel_type, time_range, selected_ids, _):
     selected_ids = selected_ids or []
-    since = datetime.utcnow() - RANGE_DELTA[time_range]
+    since = datetime.now() - RANGE_DELTA[time_range]
 
-    traces      = []
-    table_rows  = []
+    # Hinweistext je nach Aggregationsstufe
+    hint_map = {
+        "day":   "Rohdaten · alle Messpunkte",
+        "week":  "Rohdaten · alle Messpunkte",
+        "month": "Tagesdurchschnitt",
+        "year":  "Wochendurchschnitt",
+    }
+
+    traces     = []
+    table_rows = []
 
     with get_session() as s:
         all_stations = {st.id: st for st in s.query(Station).all()}
@@ -262,19 +325,12 @@ def update_view(fuel_type, time_range, selected_ids, _):
             if not st:
                 continue
 
-            # Preisverlauf für diesen Zeitraum
-            prices = (
-                s.query(Price)
-                .filter(Price.station_id == sid, Price.recorded_at >= since)
-                .order_by(Price.recorded_at)
-                .all()
-            )
-
-            if prices:
+            x, y = _get_trace_data(s, sid, fuel_type, time_range, since)
+            if x:
                 traces.append({
                     "name": f"{st.brand} · {st.place}",
-                    "x": [p.recorded_at for p in prices],
-                    "y": [getattr(p, fuel_type) for p in prices],
+                    "x": x,
+                    "y": y,
                 })
 
             # Letzter bekannter Preis für die Tabelle
@@ -298,14 +354,19 @@ def update_view(fuel_type, time_range, selected_ids, _):
     # ── Chart aufbauen ──────────────────────────────────────────────────────
     fig = go.Figure()
 
+    # Monat/Jahr: Balkendiagramm mit Linien-Overlay passt besser für Durchschnitte
+    # Tag/Woche: klassisches Linien-Diagramm
+    mode = "lines+markers" if time_range in ("day", "week") else "lines+markers"
+    marker_size = 4 if time_range in ("day", "week") else 6
+
     for t in traces:
         fig.add_trace(go.Scatter(
             x=t["x"],
             y=t["y"],
-            mode="lines+markers",
+            mode=mode,
             name=t["name"],
             line={"width": 2},
-            marker={"size": 4},
+            marker={"size": marker_size},
             hovertemplate="%{y:.3f} €<extra>%{fullData.name}</extra>",
         ))
 
@@ -320,11 +381,7 @@ def update_view(fuel_type, time_range, selected_ids, _):
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin={"t": 10, "b": 50, "l": 70, "r": 20},
-        legend={
-            "orientation": "h",
-            "y": -0.18,
-            "font": {"size": 12},
-        },
+        legend={"orientation": "h", "y": -0.18, "font": {"size": 12}},
         yaxis={
             "title": FUEL_LABEL[fuel_type],
             "tickformat": ".3f",
@@ -332,12 +389,9 @@ def update_view(fuel_type, time_range, selected_ids, _):
             "gridcolor": "#f0f0f0",
             "zeroline": False,
         },
-        xaxis={
-            "gridcolor": "#f0f0f0",
-            "showgrid": True,
-        },
+        xaxis={"gridcolor": "#f0f0f0", "showgrid": True},
         hovermode="x unified",
         font={"family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"},
     )
 
-    return fig, table_rows
+    return fig, table_rows, hint_map[time_range]
