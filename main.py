@@ -7,7 +7,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import config
-from collector import fetch_prices, fetch_stations
+from collector import _load_last_known, fetch_prices, fetch_stations
 from dashboard import app
 from db import init_db
 
@@ -24,15 +24,18 @@ if __name__ == "__main__":
     init_db()
     log.info("Datenbank bereit.")
 
-    # 2. Tankstellen im Umkreis einmalig laden
+    # 2. Tankstellen im Umkreis laden
     log.info("Lade Tankstellen im Umkreis %d km um Tostedt …", config.RADIUS_KM)
     fetch_stations()
 
-    # 3. Erste Preisabfrage sofort
+    # 3. Letzte bekannte Preise aus DB in den Speicher laden
+    _load_last_known()
+
+    # 4. Erste Preisabfrage sofort
     log.info("Erste Preisabfrage …")
     fetch_prices()
 
-    # 4. Scheduler: Preise alle 15 min, Stammdaten täglich um 03:00
+    # 5. Scheduler: Preise alle 15 min, Stammdaten täglich um 03:00
     scheduler = BackgroundScheduler(timezone="Europe/Berlin")
     scheduler.add_job(
         fetch_prices,
@@ -53,7 +56,7 @@ if __name__ == "__main__":
         config.FETCH_INTERVAL_MIN,
     )
 
-    # 5. Dashboard starten (blockierend)
+    # 6. Dashboard starten (blockierend)
     log.info(
         "Dashboard erreichbar unter http://localhost:%d  |  LAN: http://<mac-ip>:%d",
         config.DASH_PORT, config.DASH_PORT,

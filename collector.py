@@ -1,6 +1,6 @@
 """
 Holt Tankstellen-Stammdaten und aktuelle Preise von der Tankerkönig-API.
-Wird sowohl beim Start als auch zyklisch vom Scheduler aufgerufen.
+Speichert nur wenn sich ein Preis tatsächlich geändert hat.
 """
 import logging
 from datetime import datetime
@@ -12,6 +12,26 @@ from db import Price, Station, get_session
 
 log = logging.getLogger(__name__)
 BASE = "https://creativecommons.tankerkoenig.de/json"
+
+# Letzter bekannter Preis je Tankstelle – im Speicher gehalten um DB-Abfragen
+# bei jedem Zyklus zu vermeiden. Format: {station_id: (e5, e10, diesel)}
+_last_known: dict[str, tuple] = {}
+
+
+def _load_last_known() -> None:
+    """Beim Start letzte bekannte Preise aus der DB laden."""
+    with get_session() as s:
+        station_ids = [row.id for row in s.query(Station).all()]
+        for sid in station_ids:
+            last = (
+                s.query(Price)
+                .filter(Price.station_id == sid)
+                .order_by(Price.recorded_at.desc())
+                .first()
+            )
+            if last:
+                _last_known[sid] = (last.e5, last.e10, last.diesel)
+    log.info("Letzte Preise geladen: %d Tankstellen", len(_last_known))
 
 
 def fetch_stations() -> None:
@@ -43,7 +63,6 @@ def fetch_stations() -> None:
         for st in data["stations"]:
             existing = s.get(Station, st["id"])
             if existing:
-                # Stammdaten aktuell halten (Name/Adresse können sich ändern)
                 existing.name         = st.get("name", "")
                 existing.brand        = st.get("brand", "")
                 existing.street       = st.get("street", "")
@@ -70,7 +89,7 @@ def fetch_stations() -> None:
 
 
 def fetch_prices() -> None:
-    """Aktuelle Preise für alle bekannten Tankstellen abrufen."""
+    """Aktuelle Preise abrufen – nur bei Preisänderung speichern."""
     with get_session() as s:
         station_ids = [row.id for row in s.query(Station).all()]
 
@@ -95,19 +114,37 @@ def fetch_prices() -> None:
         return
 
     now = datetime.now()
-    rows = []
+    new_rows = []
+    changed = 0
+    skipped = 0
+
     for sid, p in data["prices"].items():
-        # Auch geschlossene Tankstellen speichern (Preis gilt weiter)
-        rows.append(Price(
+        e5     = p.get("e5")
+        e10    = p.get("e10")
+        diesel = p.get("diesel")
+
+        # Preise nur speichern wenn sich mindestens ein Wert geändert hat
+        current = (e5, e10, diesel)
+        if _last_known.get(sid) == current:
+            skipped += 1
+            continue
+
+        new_rows.append(Price(
             station_id=sid,
-            e5=p.get("e5"),
-            e10=p.get("e10"),
-            diesel=p.get("diesel"),
+            e5=e5,
+            e10=e10,
+            diesel=diesel,
             recorded_at=now,
         ))
+        _last_known[sid] = current
+        changed += 1
 
-    with get_session() as s:
-        s.add_all(rows)
-        s.commit()
+    if new_rows:
+        with get_session() as s:
+            s.add_all(new_rows)
+            s.commit()
 
-    log.info("Preise erfasst: %d Tankstellen um %s UTC", len(rows), now.strftime("%H:%M"))
+    log.info(
+        "Preisabfrage %s: %d geändert, %d unverändert",
+        now.strftime("%H:%M"), changed, skipped,
+    )
