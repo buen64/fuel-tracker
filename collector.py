@@ -8,7 +8,7 @@ from datetime import datetime
 import httpx
 
 import config
-from db import Price, Station, get_session
+from db import CollectorRun, Price, Station, get_session
 
 log = logging.getLogger(__name__)
 BASE = "https://creativecommons.tankerkoenig.de/json"
@@ -139,10 +139,17 @@ def fetch_prices() -> None:
         _last_known[sid] = current
         changed += 1
 
-    if new_rows:
-        with get_session() as s:
+    # Alles in einer Transaktion: neue Preise + last_seen + Heartbeat
+    seen_ids = list(data["prices"].keys())
+    with get_session() as s:
+        if new_rows:
             s.add_all(new_rows)
-            s.commit()
+        for sid in seen_ids:
+            station = s.get(Station, sid)
+            if station:
+                station.last_seen = now
+        s.add(CollectorRun(recorded_at=now))
+        s.commit()
 
     log.info(
         "Preisabfrage %s: %d geändert, %d unverändert",

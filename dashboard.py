@@ -3,17 +3,33 @@ Dash-Dashboard: Kraftstoffpreis-Verlauf für Tankstellen im Raum Tostedt.
 Erreichbar unter http://<mac-ip>:8050 im lokalen Netzwerk.
 
 Aggregationslogik:
-  Tag, Woche  → alle Messpunkte (Rohdaten)
+  Tag, Woche  → alle Messpunkte (Rohdaten), Treppenlinie (shape=hv)
   Monat       → Tagesdurchschnitt
   Jahr        → Wochendurchschnitt
+
+Chart-Features:
+  - Treppenlinie: Preiswechsel werden als senkrechter Sprung dargestellt
+  - Lückenerkennung: Ausfall erkannt wenn keine collector_runs zwischen
+    zwei Preispunkten existieren → Linie wird unterbrochen
+  - Phantom-Punkt: letzter Preis wird bis zur aktuellen Uhrzeit verlängert
+
+Ausfallüberwachung (Stammdaten-Tabelle):
+  - Orange: Station seit > 2 × FETCH_INTERVAL nicht gesehen (~30 min)
+  - Rot:    Station seit > 3 × FETCH_INTERVAL nicht gesehen (~45 min)
+
+Export:
+  - CSV-Download mit rekonstruierter 15-min-Zeitreihe (Forward-Fill)
+  - Lücken (Ausfälle) erscheinen als fehlende Zeilen im Export
 """
 from datetime import datetime, timedelta
 
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
 from sqlalchemy import func
 
-from db import Price, Station, get_session
+import config
+from db import CollectorRun, Price, Station, get_session
 
 # ---------------------------------------------------------------------------
 # Konstanten
@@ -41,6 +57,10 @@ RANGE_DELTA = {
 
 FUEL_LABEL = {"e5": "Super E5", "e10": "Super E10", "diesel": "Diesel"}
 
+# Schwellwerte für Ausfall-Anzeige in der Stammdaten-Tabelle
+WARN_THRESHOLD  = timedelta(minutes=config.FETCH_INTERVAL_MIN * 2)   # ~30 min → orange
+ERROR_THRESHOLD = timedelta(minutes=config.FETCH_INTERVAL_MIN * 3)   # ~45 min → rot
+
 # ---------------------------------------------------------------------------
 # Styles
 # ---------------------------------------------------------------------------
@@ -65,15 +85,61 @@ LABEL = {
 RADIO_ITEM = {"display": "block", "padding": "5px 0", "cursor": "pointer", "fontSize": "14px"}
 
 # ---------------------------------------------------------------------------
-# Hilfsfunktion: Aggregation je nach Zeitraum
+# Hilfsfunktionen
 # ---------------------------------------------------------------------------
+
+def _insert_gaps(s, x_vals: list, y_vals: list) -> tuple[list, list]:
+    """
+    Prüft für jedes Intervall zwischen zwei Preispunkten ob collector_runs
+    existieren. Wenn nicht → echter Ausfall → None einfügen.
+    Wenn ja → Preis war stabil, kein Gap nötig (shape=hv zeichnet horizontal).
+    """
+    if len(x_vals) < 2:
+        return x_vals, y_vals
+
+    new_x, new_y = [x_vals[0]], [y_vals[0]]
+    for i in range(1, len(x_vals)):
+        t_prev, t_curr = x_vals[i - 1], x_vals[i]
+        if isinstance(t_prev, datetime) and isinstance(t_curr, datetime):
+            run_exists = s.query(CollectorRun).filter(
+                CollectorRun.recorded_at >= t_prev,
+                CollectorRun.recorded_at < t_curr,
+            ).first()
+            if not run_exists:
+                new_x.append(None)
+                new_y.append(None)
+        new_x.append(x_vals[i])
+        new_y.append(y_vals[i])
+
+    return new_x, new_y
+
+
+def _append_phantom(x_vals: list, y_vals: list) -> tuple[list, list]:
+    """
+    Hängt einen Phantom-Punkt bei datetime.now() an – damit die Treppenlinie
+    bis zur aktuellen Uhrzeit läuft. Nur für Rohdaten (datetime-Objekte).
+    Nicht angehängt wenn letzter Wert None (nach Lücke) oder > 1 Tag alt.
+    """
+    if not x_vals or y_vals[-1] is None:
+        return x_vals, y_vals
+
+    last_x = x_vals[-1]
+    now = datetime.now()
+
+    if not isinstance(last_x, datetime):
+        return x_vals, y_vals
+
+    if now - last_x > timedelta(days=1):
+        return x_vals, y_vals
+
+    return x_vals + [now], y_vals + [y_vals[-1]]
+
 
 def _get_trace_data(s, sid: str, fuel_type: str, time_range: str, since: datetime):
     """
     Gibt (x_werte, y_werte) zurück.
-    Tag/Woche: Rohdaten
-    Monat:     Tagesdurchschnitt
-    Jahr:      Wochendurchschnitt
+    Tag/Woche: Rohdaten mit Lückenerkennung via collector_runs + Phantom-Punkt.
+    Monat/Jahr: aggregierte Durchschnittswerte.
     """
     fuel_col = getattr(Price, fuel_type)
 
@@ -85,10 +151,13 @@ def _get_trace_data(s, sid: str, fuel_type: str, time_range: str, since: datetim
             .order_by(Price.recorded_at)
             .all()
         )
-        return [r[0] for r in rows], [r[1] for r in rows]
+        x = [r[0] for r in rows]
+        y = [r[1] for r in rows]
+        x, y = _insert_gaps(s, x, y)
+        x, y = _append_phantom(x, y)
+        return x, y
 
     elif time_range == "month":
-        # Tagesdurchschnitt: nach Datum gruppieren
         rows = (
             s.query(
                 func.date(Price.recorded_at).label("day"),
@@ -103,7 +172,6 @@ def _get_trace_data(s, sid: str, fuel_type: str, time_range: str, since: datetim
         return [r[0] for r in rows], [round(r[1], 3) for r in rows]
 
     else:  # year
-        # Wochendurchschnitt: nach ISO-Kalenderwoche gruppieren
         rows = (
             s.query(
                 func.strftime("%Y-%W", Price.recorded_at).label("week"),
@@ -193,9 +261,19 @@ app.layout = html.Div([
 
             # Chart + Hinweis zur Aggregation
             html.Div([
-                html.Div(id="aggregation-hint", style={
-                    "fontSize": "11px", "color": "#aaa",
-                    "textAlign": "right", "marginBottom": "4px",
+                html.Div([
+                    html.Div(id="aggregation-hint", style={
+                        "fontSize": "11px", "color": "#aaa",
+                    }),
+                    html.Button("⬇ CSV", id="btn-export", n_clicks=0, style={
+                        "fontSize": "11px", "color": "#0070f3",
+                        "background": "none", "border": "1px solid #d0e4ff",
+                        "borderRadius": "6px", "padding": "3px 10px",
+                        "cursor": "pointer",
+                    }),
+                ], style={
+                    "display": "flex", "justifyContent": "space-between",
+                    "alignItems": "center", "marginBottom": "4px",
                 }),
                 dcc.Graph(
                     id="price-chart",
@@ -233,6 +311,15 @@ app.layout = html.Div([
                     },
                     style_data_conditional=[
                         {"if": {"row_index": "odd"}, "backgroundColor": "#fafafa"},
+                        {
+                            "if": {"filter_query": '{status} = "warn"'},
+                            "color": "#e07800",
+                        },
+                        {
+                            "if": {"filter_query": '{status} = "error"'},
+                            "color": "#cc2200",
+                            "fontWeight": "600",
+                        },
                     ],
                 ),
             ], style=CARD),
@@ -246,6 +333,7 @@ app.layout = html.Div([
 
     # Intervall: sofort beim Laden + alle 15 min
     dcc.Interval(id="interval", interval=15 * 60 * 1000, n_intervals=0),
+    dcc.Download(id="download-data"),
 
 ], style={
     "fontFamily": "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif",
@@ -266,7 +354,6 @@ app.layout = html.Div([
     State("station-filter", "value"),
 )
 def refresh_station_list(_, current_selection):
-    """Stationsliste aus DB laden; Benutzer-Auswahl beim Refresh erhalten."""
     with get_session() as s:
         stations = s.query(Station).order_by(Station.dist_km).all()
 
@@ -306,7 +393,6 @@ def update_view(fuel_type, time_range, selected_ids, _):
     selected_ids = selected_ids or []
     since = datetime.now() - RANGE_DELTA[time_range]
 
-    # Hinweistext je nach Aggregationsstufe
     hint_map = {
         "day":   "Rohdaten · alle Messpunkte",
         "week":  "Rohdaten · alle Messpunkte",
@@ -333,13 +419,21 @@ def update_view(fuel_type, time_range, selected_ids, _):
                     "y": y,
                 })
 
-            # Letzter bekannter Preis für die Tabelle
             last = (
                 s.query(Price)
                 .filter(Price.station_id == sid)
                 .order_by(Price.recorded_at.desc())
                 .first()
             )
+            now = datetime.now()
+            age = (now - st.last_seen) if st.last_seen else None
+            if age is None or age > ERROR_THRESHOLD:
+                status = "error"
+            elif age > WARN_THRESHOLD:
+                status = "warn"
+            else:
+                status = "ok"
+
             table_rows.append({
                 "brand":   st.brand,
                 "name":    st.name,
@@ -349,24 +443,24 @@ def update_view(fuel_type, time_range, selected_ids, _):
                 "e5":      f"{last.e5:.3f} €"     if last and last.e5     else "–",
                 "e10":     f"{last.e10:.3f} €"    if last and last.e10    else "–",
                 "diesel":  f"{last.diesel:.3f} €" if last and last.diesel else "–",
+                "status":  status,
             })
 
     # ── Chart aufbauen ──────────────────────────────────────────────────────
     fig = go.Figure()
 
-    # Monat/Jahr: Balkendiagramm mit Linien-Overlay passt besser für Durchschnitte
-    # Tag/Woche: klassisches Linien-Diagramm
-    mode = "lines+markers" if time_range in ("day", "week") else "lines+markers"
+    line_shape = "hv" if time_range in ("day", "week") else "linear"
     marker_size = 4 if time_range in ("day", "week") else 6
 
     for t in traces:
         fig.add_trace(go.Scatter(
             x=t["x"],
             y=t["y"],
-            mode=mode,
+            mode="lines+markers",
             name=t["name"],
-            line={"width": 2},
+            line={"width": 2, "shape": line_shape},
             marker={"size": marker_size},
+            connectgaps=False,
             hovertemplate="%{y:.3f} €<extra>%{fullData.name}</extra>",
         ))
 
@@ -395,3 +489,72 @@ def update_view(fuel_type, time_range, selected_ids, _):
     )
 
     return fig, table_rows, hint_map[time_range]
+
+
+@callback(
+    Output("download-data", "data"),
+    Input("btn-export", "n_clicks"),
+    State("fuel-type", "value"),
+    State("time-range", "value"),
+    State("station-filter", "value"),
+    prevent_initial_call=True,
+)
+def export_csv(_, fuel_type, time_range, selected_ids):
+    """
+    Rekonstruiert die vollständige 15-min-Zeitreihe per Forward-Fill:
+    collector_runs liefert den Zeitindex, Preisänderungen werden vorwärts
+    gefüllt. Ausfälle erscheinen als fehlende Zeilen im Export.
+    """
+    selected_ids = selected_ids or []
+    since = datetime.now() - RANGE_DELTA[time_range]
+
+    with get_session() as s:
+        # Zeitindex = alle erfolgreichen Collector-Läufe im Zeitraum
+        runs = (
+            s.query(CollectorRun.recorded_at)
+            .filter(CollectorRun.recorded_at >= since)
+            .order_by(CollectorRun.recorded_at)
+            .all()
+        )
+        run_times = [r[0] for r in runs]
+
+        if not run_times:
+            return None
+
+        all_stations = {st.id: st for st in s.query(Station).all()}
+        df = pd.DataFrame({"Zeitpunkt": run_times})
+
+        for sid in selected_ids:
+            st = all_stations.get(sid)
+            if not st:
+                continue
+
+            fuel_col = getattr(Price, fuel_type)
+            prices = (
+                s.query(Price.recorded_at, fuel_col)
+                .filter(
+                    Price.station_id == sid,
+                    Price.recorded_at >= since,
+                    fuel_col.isnot(None),
+                )
+                .order_by(Price.recorded_at)
+                .all()
+            )
+            if not prices:
+                continue
+
+            price_df = pd.DataFrame(prices, columns=["Zeitpunkt", "price"])
+
+            # merge_asof: für jeden Run-Zeitstempel den letzten Preis davor
+            merged = pd.merge_asof(
+                df[["Zeitpunkt"]],
+                price_df,
+                on="Zeitpunkt",
+                direction="backward",
+            )
+            col = f"{st.brand} · {st.place} [{FUEL_LABEL[fuel_type]}]"
+            df[col] = merged["price"].round(3)
+
+    df["Zeitpunkt"] = df["Zeitpunkt"].dt.strftime("%Y-%m-%d %H:%M")
+    filename = f"fuel_{fuel_type}_{time_range}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    return dcc.send_data_frame(df.to_csv, filename, index=False, sep=";")

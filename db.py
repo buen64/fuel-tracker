@@ -29,6 +29,7 @@ class Station(Base):
     lat          = Column(Float)
     lng          = Column(Float)
     dist_km      = Column(Float)   # Entfernung zu Tostedt-Mitte
+    last_seen    = Column(DateTime, nullable=True)  # Letzter erfolgreicher Fetch
 
 
 class Price(Base):
@@ -40,6 +41,14 @@ class Price(Base):
     e5          = Column(Float)
     e10         = Column(Float)
     diesel      = Column(Float)
+    recorded_at = Column(DateTime, nullable=False, index=True, default=datetime.now)
+
+
+class CollectorRun(Base):
+    """Heartbeat: ein Eintrag pro erfolgreichem fetch_prices()-Zyklus."""
+    __tablename__ = "collector_runs"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
     recorded_at = Column(DateTime, nullable=False, index=True, default=datetime.now)
 
 
