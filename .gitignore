@@ -7,7 +7,11 @@
 *.db-wal
 
 # Logs
+*.log
 logs/
+
+# Wiederaufnahme-Prompts (lokale Gesprächshilfe, kein Projektbestandteil)
+wiederaufnahme_*.md
 
 # Python
 __pycache__/
